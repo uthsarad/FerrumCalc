@@ -7,10 +7,11 @@ A modern, high-performance native desktop calculator built with **Rust** and **e
 
 ## Features
 
-- **Three Calculator Modes**
+- **Calculator Modes**
   - **Standard** — Basic arithmetic with a clean 4×5 keypad
   - **Scientific** — Trigonometry, logarithms, powers, factorial, constants (π, e), RAD/DEG toggle
   - **Programmer** — Hex/Dec/Oct/Bin base switching, bitwise operations (AND, OR, XOR, NOT, shifts), live base conversions
+  - **Graph** _(draft)_ — Plots `y = f(x)` live from the input expression using the variable `x` (e.g. `4*sin(x)`, `x^2 - 3`)
 
 - **Smart Expression Evaluation**
   - Formula-based input — type full expressions like `2 + 3 * 4`
@@ -24,9 +25,11 @@ A modern, high-performance native desktop calculator built with **Rust** and **e
   - Smooth hover effects and accent-colored equals button
   - Responsive button grid that adapts to window size
 
-- **Keyboard Support** — Type naturally with number keys, operators, Enter to evaluate, Escape to clear
+- **Keyboard Support** — Type naturally with number keys, operators, Enter to evaluate, Escape to clear, plus Ctrl/Cmd+C to copy the result and Ctrl/Cmd+V to paste an expression
 
 - **History Sidebar** — Collapsible panel showing past calculations, click any entry to restore it
+
+- **Persistent State** — Preferences (mode, base, angle mode, theme) and history are saved automatically and restored on the next launch; the calculator always opens with a cleared expression
 
 ## Quick Start
 
@@ -83,7 +86,10 @@ FerrumCalc/
 | `Enter` | Evaluate expression |
 | `Backspace` | Delete last character |
 | `Escape` / `Delete` | Clear all |
+| `Ctrl`/`Cmd` + `C` | Copy result to clipboard |
+| `Ctrl`/`Cmd` + `V` | Paste expression from clipboard |
 | `A-F` | Hex digits (Programmer mode) |
+| `a-z` | Function names & the variable `x` (Scientific / Graph modes), e.g. `sin(x)` |
 
 ## License
 

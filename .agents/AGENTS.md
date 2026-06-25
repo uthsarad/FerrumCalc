@@ -9,6 +9,7 @@ FerrumCalc is a native desktop calculator written in **Rust** using **egui** (vi
 ```
 src/
 ├── main.rs                   # Entry point: eframe window config, launches FerrumCalcApp
+├── icon.rs                   # Procedurally-generated window icon (raw RGBA, no image asset)
 ├── ui.rs                     # All GUI rendering, theming, keyboard handling (~700 lines)
 └── calculator/
     ├── mod.rs                # Module re-exports
@@ -56,6 +57,37 @@ User Input (click or key) → ui.rs handles event → state.rs mutates Calculato
 - **`#![cfg_attr(...)]`** inner attributes must appear before any doc comments in `main.rs`.
 - **egui is re-exported by eframe**: Access via `eframe::egui` or `use eframe::egui;` — no need to add `egui` as a separate dependency.
 
+## Persistence
+
+- The `persistence` feature is enabled on `eframe` in `Cargo.toml`. This pulls in `ron` (serialization) and `arboard` (clipboard).
+- `CalculatorState` derives `serde::Serialize`/`Deserialize`. The entire state — including history and preferences — is the persisted unit.
+- **Save**: `FerrumCalcApp::save` calls `eframe::set_value(storage, eframe::APP_KEY, &self.state)`. eframe invokes `save` periodically and on exit.
+- **Load**: `FerrumCalcApp::new` reads `cc.storage` via `eframe::get_value::<CalculatorState>(storage, eframe::APP_KEY)`, falling back to `Default` on first launch or unreadable data. **The working expression and result are cleared on load** (`input`, `result_display`, `has_error`, `just_evaluated`) so the calculator always opens fresh — only preferences (mode, base, angle, theme) and history are restored. If you want a launch to also forget history, clear `state.history` in that same `.map(...)` closure.
+- **Clipboard**: copy is deferred until *after* the `ctx.input(..)` closure returns — calling `ctx` methods from inside that closure can deadlock. Paste arrives as `egui::Event::Paste` and is routed through `CalculatorState::paste`, which strips control characters.
+
+## Window Icon
+
+- `src/icon.rs` builds the window/taskbar icon at runtime as a raw 256×256 RGBA buffer (`egui::IconData`) and `main.rs` passes it via `ViewportBuilder::with_icon`. There is **no** image file and **no** PNG decoder dependency.
+- The motif is a flat calculator (rounded indigo square + light display bar + 3×3 keypad, right column orange) drawn with signed-distance-field coverage for lightly anti-aliased edges.
+- To tweak the design, edit the color constants and the `col_x`/`row_y` layout arrays in `app_icon`. The unit tests assert dimensions, a transparent corner, an opaque indigo body, and the orange operator column — update them if you change the layout.
+
+## Keypad Layout & Scaling
+
+- Both keypad renderers (`render_button_grid`, `render_button_grid_with_base`) size buttons to fill the panel's *remaining* height: `btn_height = (available_height − (rows−1)·spacing) / rows`, clamped to a `[min, max]` range.
+- Two things must stay in sync or the grid overflows the window bottom: (1) `ui.spacing_mut().item_spacing.y` is pinned to the same `spacing` used in the height math, and (2) `available_height` subtracts one extra `spacing` to account for the leading gap egui inserts before the first row.
+- Keep the `min` clamp low enough that the tallest keypad (Programmer, 8 rows) still fits at the minimum window size (320×480). Raising it risks reintroducing bottom overflow.
+
+## Graph Mode (draft)
+
+> Marked **draft** in the UI (a "DRAFT" badge in the header). It is functional but intentionally minimal — see the polish items under "Potential Improvements".
+
+- A fourth `CalculatorMode::Graph` variant. Selectable from the toolbar (and the compact history-open ComboBox).
+- **Variable `x`**: the parser resolves the identifier `x` via `parser::evaluate_at(input, use_degrees, x)`. Plain `evaluate` leaves `x` undefined (errors), so non-graph modes are unaffected.
+- **Live plotting**: there is no "=" in graph mode; the plot re-samples `self.state.input` every frame. `render_graph_canvas` evaluates `y = f(x)` once per horizontal pixel over a fixed `[-10, 10] × [-10, 10]` domain, breaking the line across large jumps (asymptotes) and clipping to the plot rect via `ui.painter_at`.
+- **Layout**: graph mode bypasses `render_display`/`render_keypad` and uses `render_graph_display` + `render_graph_canvas` + `render_graph_keypad`. The canvas takes ~half the remaining height (clamped) so the keypad still fits.
+- **Typing**: letters are accepted from the keyboard in Scientific and Graph modes (so you can type `sin(x)`); they remain hex-only in Programmer mode and ignored in Standard. `Enter` is a no-op in graph mode.
+- The expression is shared across modes (it's the same `input` buffer), so switching from Graph back to Standard and pressing `=` evaluates whatever is typed (with `x` undefined).
+
 ## Build & Test Commands
 
 ```powershell
@@ -97,18 +129,21 @@ cargo build --release
 - Full keyboard input
 - Collapsible history sidebar (click to restore, clear button)
 - Dark/light theme toggle with Fluent-inspired color palette
-- 40 unit tests all passing
+- Persistent state: history and preferences saved to disk via eframe storage (see "Persistence" below)
+- Copy/paste support (Ctrl/Cmd+C copies the result, Ctrl/Cmd+V pastes a sanitized expression)
+- Procedurally-generated window/taskbar icon (see "Window Icon" below)
+- Keypad sizes to fit the panel exactly in every mode, so the taller Scientific (7 rows) and Programmer (8 rows) keypads never overflow the window bottom
+- Fresh-start on launch: saved preferences and history are restored, but the working expression/result is always cleared (see "Persistence")
+- Graph mode (**draft**): plots `y = f(x)` from the input expression (see "Graph Mode (draft)" below)
+- 51 unit tests all passing
 
 ### 🔲 Potential Improvements
-- Persist history and preferences to disk (serde is already a dependency)
-- Copy/paste support (Ctrl+C to copy result, Ctrl+V to paste expression)
+- Graph mode polish: pan/zoom, auto-fit y-range, trace/cursor readout, multiple plotted functions
 - Keyboard shortcut hints or tooltips on buttons
 - Animation/transition effects when switching modes
-- Custom window icon
 - Inverse trig/hyperbolic function panel (asin, acos, atan, etc. — parser supports them, UI buttons not yet exposed)
 - Memory functions (M+, M-, MR, MC)
 - Unit conversion mode
-- Responsive layout that adapts button sizes more fluidly
 - Release build optimizations and Windows installer (MSI/NSIS)
 
 ## Troubleshooting

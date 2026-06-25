@@ -8,6 +8,7 @@
 ///   - Full keyboard input handling
 
 use eframe::egui;
+use crate::calculator::parser;
 use crate::calculator::state::{AngleMode, CalculatorMode, CalculatorState, NumBase};
 
 // ── Color Palette ────────────────────────────────────────────────────────────
@@ -144,11 +145,33 @@ impl FerrumCalcApp {
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
         cc.egui_ctx.set_style(style);
 
-        Self::default()
+        // Restore persisted state (history + preferences) from a previous session.
+        // Falls back to defaults on first launch or if the stored data is unreadable.
+        let state = cc
+            .storage
+            .and_then(|storage| eframe::get_value::<CalculatorState>(storage, eframe::APP_KEY))
+            .map(|mut state| {
+                // Start every session with a clean slate: saved preferences and
+                // history are kept, but the working expression and result are
+                // cleared so the calculator always opens fresh.
+                state.input.clear();
+                state.result_display = "0".to_string();
+                state.has_error = false;
+                state.just_evaluated = false;
+                state
+            })
+            .unwrap_or_default();
+
+        Self { state }
     }
 }
 
 impl eframe::App for FerrumCalcApp {
+    /// Persist the full calculator state (history and preferences) to disk.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, &self.state);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let theme = Theme::current(self.state.dark_mode);
 
@@ -172,25 +195,35 @@ impl eframe::App for FerrumCalcApp {
 
                 ui.add_space(8.0);
 
-                // Display area
-                self.render_display(ui, &theme);
+                if self.state.mode == CalculatorMode::Graph {
+                    // Graph mode (draft): function display + live plot + compact keypad.
+                    let use_degrees = self.state.angle_mode == AngleMode::Degrees;
+                    self.render_graph_display(ui, &theme, use_degrees);
+                    ui.add_space(8.0);
+                    self.render_graph_canvas(ui, &theme, use_degrees);
+                    ui.add_space(8.0);
+                    self.render_graph_keypad(ui, &theme);
+                } else {
+                    // Display area
+                    self.render_display(ui, &theme);
 
-                ui.add_space(8.0);
+                    ui.add_space(8.0);
 
-                // Programmer mode: base selector & conversions
-                if self.state.mode == CalculatorMode::Programmer {
-                    self.render_base_selector(ui, &theme);
-                    ui.add_space(4.0);
+                    // Programmer mode: base selector & conversions
+                    if self.state.mode == CalculatorMode::Programmer {
+                        self.render_base_selector(ui, &theme);
+                        ui.add_space(4.0);
+                    }
+
+                    // Scientific mode: angle mode toggle
+                    if self.state.mode == CalculatorMode::Scientific {
+                        self.render_angle_toggle(ui, &theme);
+                        ui.add_space(4.0);
+                    }
+
+                    // Keypad
+                    self.render_keypad(ui, &theme);
                 }
-
-                // Scientific mode: angle mode toggle
-                if self.state.mode == CalculatorMode::Scientific {
-                    self.render_angle_toggle(ui, &theme);
-                    ui.add_space(4.0);
-                }
-
-                // Keypad
-                self.render_keypad(ui, &theme);
             });
     }
 }
@@ -235,10 +268,11 @@ impl FerrumCalcApp {
                         ui.selectable_value(&mut self.state.mode, CalculatorMode::Standard, "Standard");
                         ui.selectable_value(&mut self.state.mode, CalculatorMode::Scientific, "Scientific");
                         ui.selectable_value(&mut self.state.mode, CalculatorMode::Programmer, "Programmer");
+                        ui.selectable_value(&mut self.state.mode, CalculatorMode::Graph, "Graph");
                     });
             } else {
-                // Wide mode: show all three mode buttons
-                for mode in &[CalculatorMode::Standard, CalculatorMode::Scientific, CalculatorMode::Programmer] {
+                // Wide mode: show all mode buttons
+                for mode in &[CalculatorMode::Standard, CalculatorMode::Scientific, CalculatorMode::Programmer, CalculatorMode::Graph] {
                     let selected = self.state.mode == *mode;
                     let btn_color = if selected { Palette::ACCENT } else { theme.btn };
                     let text_color = if selected { Palette::ACCENT_TEXT } else { theme.text_dim };
@@ -246,7 +280,7 @@ impl FerrumCalcApp {
                     let btn = egui::Button::new(
                         egui::RichText::new(mode.label())
                             .color(text_color)
-                            .size(12.0)
+                            .size(11.0)
                     )
                     .fill(btn_color)
                     .corner_radius(egui::CornerRadius::same(6))
@@ -406,6 +440,156 @@ impl FerrumCalcApp {
         });
     }
 
+    // ── Graph Mode (draft) ──
+
+    /// Compact "y = f(x)" header for graph mode, with a DRAFT badge and an
+    /// inline parse-error message when the expression can't be evaluated.
+    fn render_graph_display(&self, ui: &mut egui::Ui, theme: &Theme, use_degrees: bool) {
+        egui::Frame::new()
+            .fill(theme.card)
+            .corner_radius(egui::CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("GRAPH")
+                            .color(Palette::ACCENT)
+                            .size(11.0)
+                            .strong(),
+                    );
+                    // Small "DRAFT" badge to flag this as an experimental feature.
+                    egui::Frame::new()
+                        .fill(Palette::ACCENT.gamma_multiply(0.25))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("DRAFT").color(theme.text_dim).size(9.0).strong(),
+                            );
+                        });
+                });
+                ui.add_space(2.0);
+
+                let expr = if self.state.input.trim().is_empty() {
+                    "…".to_string()
+                } else {
+                    self.state.input.clone()
+                };
+                ui.label(
+                    egui::RichText::new(format!("y = {}", expr))
+                        .color(theme.text)
+                        .family(egui::FontFamily::Name("Display".into()))
+                        .size(18.0),
+                );
+
+                if let Some(err) = self.graph_error(use_degrees) {
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(err).color(Palette::ERROR).size(11.0));
+                }
+            });
+    }
+
+    /// Returns a parse/evaluation error if the current expression fails for
+    /// every sampled `x`. Domain errors at isolated points (e.g. `1/x` at 0)
+    /// don't count, so a valid function is never flagged.
+    fn graph_error(&self, use_degrees: bool) -> Option<String> {
+        if self.state.input.trim().is_empty() {
+            return None;
+        }
+        let mut first_err = None;
+        for &x in &[0.5_f64, 1.0, 2.0, -1.0, 3.0] {
+            match parser::evaluate_at(&self.state.input, use_degrees, x) {
+                Ok(v) if v.is_finite() => return None,
+                Ok(_) => {}
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        first_err
+    }
+
+    /// Draws the plot: a fixed [-10, 10] × [-10, 10] grid with axes and the
+    /// sampled curve of `y = f(x)`.
+    fn render_graph_canvas(&self, ui: &mut egui::Ui, theme: &Theme, use_degrees: bool) {
+        // Give the plot roughly half the remaining height, leaving the rest for
+        // the keypad; clamp so neither collapses on small windows.
+        let total_h = ui.available_height();
+        let plot_h = (total_h * 0.5).max(120.0).min((total_h - 120.0).max(120.0));
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, plot_h), egui::Sense::hover());
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, egui::CornerRadius::same(12), theme.card);
+
+        let (xmin, xmax, ymin, ymax) = (-10.0_f64, 10.0, -10.0, 10.0);
+        let to_screen = |wx: f64, wy: f64| {
+            let nx = ((wx - xmin) / (xmax - xmin)) as f32;
+            let ny = ((wy - ymin) / (ymax - ymin)) as f32;
+            egui::pos2(rect.left() + nx * rect.width(), rect.bottom() - ny * rect.height())
+        };
+
+        let grid = egui::Stroke::new(1.0, theme.text_dim.gamma_multiply(0.22));
+        let axis = egui::Stroke::new(1.5, theme.text_dim.gamma_multiply(0.7));
+
+        for i in (xmin as i32)..=(xmax as i32) {
+            let x = i as f64;
+            let s = if i == 0 { axis } else { grid };
+            painter.line_segment([to_screen(x, ymin), to_screen(x, ymax)], s);
+        }
+        for j in (ymin as i32)..=(ymax as i32) {
+            let y = j as f64;
+            let s = if j == 0 { axis } else { grid };
+            painter.line_segment([to_screen(xmin, y), to_screen(xmax, y)], s);
+        }
+
+        // Sample the curve one point per horizontal pixel.
+        if !self.state.input.trim().is_empty() {
+            let curve = egui::Stroke::new(2.0, Palette::ACCENT);
+            let n = rect.width().max(2.0) as usize;
+            let mut prev: Option<(f64, f64)> = None;
+            for px in 0..=n {
+                let wx = xmin + (px as f64 / n as f64) * (xmax - xmin);
+                match parser::evaluate_at(&self.state.input, use_degrees, wx) {
+                    Ok(wy) if wy.is_finite() => {
+                        if let Some((pwx, pwy)) = prev {
+                            // Skip the segment across a likely asymptote / discontinuity.
+                            if (wy - pwy).abs() <= (ymax - ymin) * 1.5 {
+                                painter.line_segment([to_screen(pwx, pwy), to_screen(wx, wy)], curve);
+                            }
+                        }
+                        prev = Some((wx, wy));
+                    }
+                    _ => prev = None,
+                }
+            }
+        }
+
+        painter.text(
+            rect.left_top() + egui::vec2(8.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            "x, y ∈ [−10, 10]",
+            egui::FontId::proportional(10.0),
+            theme.text_dim,
+        );
+    }
+
+    /// Compact keypad for graph mode. Advanced functions can also be typed on
+    /// the keyboard (letters are accepted in graph mode).
+    fn render_graph_keypad(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let rows: &[&[(&str, ButtonKind)]] = &[
+            &[("x", ButtonKind::Variable), ("(", ButtonKind::Paren), (")", ButtonKind::Paren), ("^", ButtonKind::Operator), ("√", ButtonKind::SciFunc)],
+            &[("sin", ButtonKind::SciFunc), ("cos", ButtonKind::SciFunc), ("tan", ButtonKind::SciFunc), ("π", ButtonKind::Constant), ("e", ButtonKind::Constant)],
+            &[("7", ButtonKind::Digit), ("8", ButtonKind::Digit), ("9", ButtonKind::Digit), ("÷", ButtonKind::Operator), ("⌫", ButtonKind::Backspace)],
+            &[("4", ButtonKind::Digit), ("5", ButtonKind::Digit), ("6", ButtonKind::Digit), ("×", ButtonKind::Operator), ("C", ButtonKind::Clear)],
+            &[("1", ButtonKind::Digit), ("2", ButtonKind::Digit), ("3", ButtonKind::Digit), ("−", ButtonKind::Operator), ("+", ButtonKind::Operator)],
+            &[("±", ButtonKind::Function), ("0", ButtonKind::Digit), (".", ButtonKind::Digit), ("%", ButtonKind::Operator), ("", ButtonKind::Spacer)],
+        ];
+        self.render_button_grid(ui, theme, rows);
+    }
+
     // ── Keypad ──
 
     fn render_keypad(&mut self, ui: &mut egui::Ui, theme: &Theme) {
@@ -413,6 +597,7 @@ impl FerrumCalcApp {
             CalculatorMode::Standard   => self.render_standard_keypad(ui, theme),
             CalculatorMode::Scientific => self.render_scientific_keypad(ui, theme),
             CalculatorMode::Programmer => self.render_programmer_keypad(ui, theme),
+            CalculatorMode::Graph      => self.render_graph_keypad(ui, theme),
         }
     }
 
@@ -463,15 +648,19 @@ impl FerrumCalcApp {
         theme: &Theme,
         rows: &[&[(&str, ButtonKind)]],
     ) {
-        let available_width = ui.available_width();
-        let available_height = ui.available_height();
-        let num_rows = rows.len() as f32;
         let spacing = 5.0;
+        let available_width = ui.available_width();
+        // Match the inter-row gap to the value used in the height math and reserve
+        // the leading gap egui inserts before the first row, so the grid fills the
+        // remaining panel height exactly instead of spilling past the bottom edge.
+        ui.spacing_mut().item_spacing.y = spacing;
+        let available_height = (ui.available_height() - spacing).max(0.0);
+        let num_rows = rows.len() as f32;
 
         for row in rows {
             let num_cols = row.len() as f32;
             let btn_width = (available_width - (num_cols - 1.0) * spacing) / num_cols;
-            let btn_height = ((available_height - (num_rows - 1.0) * spacing) / num_rows).min(56.0).max(36.0);
+            let btn_height = ((available_height - (num_rows - 1.0) * spacing) / num_rows).max(28.0).min(56.0);
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = spacing;
@@ -526,15 +715,18 @@ impl FerrumCalcApp {
         rows: &[&[(&str, ButtonKind)]],
         base: NumBase,
     ) {
-        let available_width = ui.available_width();
-        let available_height = ui.available_height();
-        let num_rows = rows.len() as f32;
         let spacing = 5.0;
+        let available_width = ui.available_width();
+        // See render_button_grid: pin the row gap and reserve the leading gap so
+        // the (taller) 8-row programmer keypad never overflows the panel bottom.
+        ui.spacing_mut().item_spacing.y = spacing;
+        let available_height = (ui.available_height() - spacing).max(0.0);
+        let num_rows = rows.len() as f32;
 
         for row in rows {
             let num_cols = row.len() as f32;
             let btn_width = (available_width - (num_cols - 1.0) * spacing) / num_cols;
-            let btn_height = ((available_height - (num_rows - 1.0) * spacing) / num_rows).min(48.0).max(32.0);
+            let btn_height = ((available_height - (num_rows - 1.0) * spacing) / num_rows).max(24.0).min(48.0);
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = spacing;
@@ -616,6 +808,7 @@ impl FerrumCalcApp {
             ButtonKind::SciFunc | ButtonKind::Paren => (theme.btn_op, theme.btn_op_hover, Palette::ACCENT),
             ButtonKind::BitOp => (theme.btn_op, theme.btn_op_hover, Palette::ACCENT),
             ButtonKind::Constant => (theme.btn_op, theme.btn_op_hover, Palette::ACCENT),
+            ButtonKind::Variable => (theme.btn_op, theme.btn_op_hover, Palette::ACCENT),
             ButtonKind::Function => (theme.btn_op, theme.btn_op_hover, theme.text),
             ButtonKind::HexDigit => (theme.btn, theme.btn_hover, theme.text),
             _ => (theme.btn, theme.btn_hover, theme.text),
@@ -690,6 +883,9 @@ impl FerrumCalcApp {
                     ">>"  => self.state.push_input(" >> "),
                     _ => {}
                 }
+            }
+            ButtonKind::Variable => {
+                self.state.push_input("x");
             }
             ButtonKind::Spacer => {}
         }
@@ -795,6 +991,11 @@ impl FerrumCalcApp {
     // ── Keyboard Input ──
 
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        // Text to place on the clipboard, deferred until after the input closure
+        // releases its borrow of `ctx` (calling `ctx` methods from inside
+        // `ctx.input(..)` can deadlock).
+        let mut to_copy: Option<String> = None;
+
         ctx.input(|i| {
             for event in &i.events {
                 match event {
@@ -811,27 +1012,57 @@ impl FerrumCalcApp {
                                 '^' => self.state.push_input("^"),
                                 '(' => self.state.push_input("("),
                                 ')' => self.state.push_input(")"),
-                                // Hex digits in programmer mode
-                                'a'..='f' | 'A'..='F' if self.state.mode == CalculatorMode::Programmer => {
-                                    self.state.push_input(&ch.to_uppercase().to_string());
-                                }
+                                // Letters: hex digits in programmer mode; function
+                                // names, constants and the graph variable `x` in
+                                // scientific and graph modes (e.g. typing "sin(x").
+                                c if c.is_ascii_alphabetic() => match self.state.mode {
+                                    CalculatorMode::Programmer => {
+                                        if c.is_ascii_hexdigit() {
+                                            self.state.push_input(&c.to_uppercase().to_string());
+                                        }
+                                    }
+                                    CalculatorMode::Scientific | CalculatorMode::Graph => {
+                                        self.state.push_input(&c.to_lowercase().to_string());
+                                    }
+                                    CalculatorMode::Standard => {}
+                                },
                                 _ => {}
                             }
                         }
                     }
                     egui::Event::Key { key, pressed: true, .. } => {
                         match key {
-                            egui::Key::Enter => self.state.evaluate(),
+                            // In graph mode the plot updates live, so Enter is a no-op.
+                            egui::Key::Enter if self.state.mode != CalculatorMode::Graph => {
+                                self.state.evaluate()
+                            }
                             egui::Key::Backspace => self.state.backspace(),
                             egui::Key::Escape => self.state.clear_all(),
                             egui::Key::Delete => self.state.clear_all(),
                             _ => {}
                         }
                     }
+                    // Ctrl+C / Cmd+C: copy the current result (or the expression
+                    // if the result is an error message).
+                    egui::Event::Copy => {
+                        to_copy = Some(if self.state.has_error {
+                            self.state.input.clone()
+                        } else {
+                            self.state.result_display.clone()
+                        });
+                    }
+                    // Ctrl+V / Cmd+V: paste an expression into the input buffer.
+                    egui::Event::Paste(text) => {
+                        self.state.paste(text);
+                    }
                     _ => {}
                 }
             }
         });
+
+        if let Some(text) = to_copy {
+            ctx.copy_text(text);
+        }
     }
 }
 
@@ -849,6 +1080,7 @@ enum ButtonKind {
     SciFunc,
     Paren,
     Constant,
+    Variable,
     BitOp,
     Spacer,
 }

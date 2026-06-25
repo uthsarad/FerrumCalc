@@ -234,11 +234,14 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     use_degrees: bool,
+    /// Value bound to the `x` identifier, used by the graphing mode. `None`
+    /// means `x` is undefined and referencing it is an error.
+    x: Option<f64>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, use_degrees: bool) -> Self {
-        Self { tokens, pos: 0, use_degrees }
+        Self { tokens, pos: 0, use_degrees, x: None }
     }
 
     fn peek(&self) -> &Token {
@@ -457,6 +460,7 @@ impl Parser {
                 match name.as_str() {
                     "pi" => Ok(PI),
                     "e"  => Ok(E),
+                    "x"  => self.x.ok_or_else(|| "Unknown identifier: 'x'".to_string()),
                     _    => Err(format!("Unknown identifier: '{}'", name)),
                 }
             }
@@ -532,6 +536,21 @@ pub fn evaluate(input: &str, use_degrees: bool) -> Result<f64, String> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens, use_degrees);
+    parser.parse()
+}
+
+/// Evaluate an expression with the variable `x` bound to a value.
+///
+/// Used by the graphing mode to sample `y = f(x)` across a domain. Identical to
+/// [`evaluate`] except that references to `x` resolve to `x_value`.
+pub fn evaluate_at(input: &str, use_degrees: bool, x_value: f64) -> Result<f64, String> {
+    if input.trim().is_empty() {
+        return Err("Empty expression".to_string());
+    }
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize()?;
+    let mut parser = Parser::new(tokens, use_degrees);
+    parser.x = Some(x_value);
     parser.parse()
 }
 
@@ -777,6 +796,22 @@ mod tests {
     #[test]
     fn test_format_decimal() {
         assert_eq!(format_result(3.14), "3.14");
+    }
+
+    // Graphing variable (x)
+    #[test]
+    fn test_variable_x_linear() {
+        assert_eq!(evaluate_at("2*x + 1", false, 3.0).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn test_variable_x_in_function() {
+        assert_eq!(evaluate_at("x^2", false, 4.0).unwrap(), 16.0);
+    }
+
+    #[test]
+    fn test_variable_x_undefined_without_binding() {
+        assert!(eval_err("x + 1").contains("Unknown identifier: 'x'"));
     }
 
     // Base conversion

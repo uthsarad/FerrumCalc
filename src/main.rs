@@ -6,6 +6,7 @@
 /// and launches the FerrumCalc calculator.
 
 mod calculator;
+mod icon;
 mod ui;
 
 use eframe::egui;
@@ -15,6 +16,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FerrumCalc")
+            .with_icon(std::sync::Arc::new(icon::app_icon()))
             .with_inner_size([380.0, 600.0])
             .with_min_inner_size([320.0, 480.0])
             .with_max_inner_size([800.0, 1000.0]),

@@ -12,6 +12,8 @@ pub enum CalculatorMode {
     Standard,
     Scientific,
     Programmer,
+    /// Draft graphing mode: plots `y = f(x)` from the input expression.
+    Graph,
 }
 
 impl CalculatorMode {
@@ -20,6 +22,7 @@ impl CalculatorMode {
             Self::Standard   => "Standard",
             Self::Scientific => "Scientific",
             Self::Programmer => "Programmer",
+            Self::Graph      => "Graph",
         }
     }
 }
@@ -228,6 +231,19 @@ impl CalculatorState {
         self.history_open = !self.history_open;
     }
 
+    /// Insert pasted text into the input buffer.
+    ///
+    /// Control characters (newlines, tabs, etc.) are stripped so a multi-line
+    /// clipboard payload collapses into a single expression. Other characters
+    /// are passed through; the parser will reject anything it can't understand
+    /// when the expression is evaluated.
+    pub fn paste(&mut self, text: &str) {
+        let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+        if !cleaned.is_empty() {
+            self.push_input(&cleaned);
+        }
+    }
+
     /// Toggle negate the current input.
     pub fn negate(&mut self) {
         if self.input.is_empty() {
@@ -238,5 +254,46 @@ impl CalculatorState {
         } else {
             self.input.insert(0, '-');
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_paste_strips_newlines() {
+        let mut state = CalculatorState::default();
+        state.paste("2 +\n3\t");
+        assert_eq!(state.input, "2 +3");
+    }
+
+    #[test]
+    fn test_paste_appends_to_existing_input() {
+        let mut state = CalculatorState::default();
+        state.push_input("1 + ");
+        state.paste("2");
+        assert_eq!(state.input, "1 + 2");
+    }
+
+    #[test]
+    fn test_paste_after_evaluation_replaces_when_numeric() {
+        let mut state = CalculatorState::default();
+        state.push_input("2 + 2");
+        state.evaluate();
+        assert_eq!(state.input, "4");
+        // Pasting a fresh number after a result starts a new expression.
+        state.paste("9");
+        assert_eq!(state.input, "9");
+    }
+
+    #[test]
+    fn test_paste_empty_after_cleaning_is_noop() {
+        let mut state = CalculatorState::default();
+        state.push_input("5");
+        state.paste("\n\t\r");
+        assert_eq!(state.input, "5");
     }
 }
